@@ -456,17 +456,16 @@ class FastCRUD(
 
         db_row = await db.execute(stmt)
         result: Optional[Row] = db_row.first()
-        if result is not None:
-            out: dict = dict(result._mapping)
-            if return_as_model:
-                if not schema_to_select:
-                    raise ValueError(
-                        "schema_to_select must be provided when return_as_model is True."
-                    )
-                return schema_to_select(**out)
+        if result is None:
+            return
+        out: dict = dict(result._mapping)
+        if not return_as_model:
             return out
-
-        return None
+        if not schema_to_select:
+            raise ValueError(
+                "schema_to_select must be provided when return_as_model is True."
+            )
+        return schema_to_select(**out)
 
     def _get_pk_dict(self, instance):
         return {pk.name: getattr(instance, pk.name) for pk in self._primary_keys}
