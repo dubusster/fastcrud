@@ -271,7 +271,7 @@ class FastCRUD(
 
         return stmt
 
-    async def create(self, db: AsyncSession, object: CreateSchemaType) -> ModelType:
+    async def create(self, db: AsyncSession, instance: CreateSchemaType) -> ModelType:
         """
         Create a new record in the database.
 
@@ -282,11 +282,56 @@ class FastCRUD(
         Returns:
             The created database object.
         """
-        object_dict = object.model_dump()
-        db_object: ModelType = self.model(**object_dict)
-        db.add(db_object)
+        table_name_to_class = {
+            m.tables[0].name: m.class_ for m in self.model.registry.mappers
+        }
+        inspector = inspect(self.model)
+        relationships = inspector.relationships
+        elmts = {}
+        for r in relationships:
+            attr_name = r.key
+            if not hasattr(instance, attr_name):
+                continue
+
+            value = getattr(instance, attr_name, None)
+            if value is None:
+                continue
+
+            target_table_name = r.target.name
+            TargetModel = table_name_to_class[target_table_name]
+
+            subcrud = FastCRUD(model=TargetModel)
+
+            if getattr(self.model, attr_name).prop.secondary is not None or isinstance(
+                value, list
+            ):
+                _subelements = []
+                for elmt in value:
+                    db_elmt = await subcrud.get(db, **elmt.model_dump())
+                    db_elmt = (
+                        await subcrud.create(db, elmt)
+                        if db_elmt is None
+                        else subcrud.model(**db_elmt)
+                    )
+
+                    _subelements.append(db_elmt)
+                elmts[attr_name] = _subelements
+            else:
+                db_elmt = await subcrud.get(db, **value.model_dump())
+                db_elmt = (
+                    await subcrud.create(db, value)
+                    if db_elmt is None
+                    else subcrud.model(**db_elmt)
+                )
+                elmts[attr_name] = db_elmt
+
+        instance_dict = dict(**elmts, **instance.model_dump(exclude=set(elmts)))
+
+        db_instance: ModelType = self.model(**instance_dict)
+        db_instance = await db.merge(db_instance)
         await db.commit()
-        return db_object
+        
+        return db_instance
 
     async def select(
         self,
