@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 
 from pydantic import BaseModel, ValidationError
 from sqlalchemy import select, update, delete, func, inspect, asc, desc
+import sqlalchemy
 from sqlalchemy.exc import ArgumentError, MultipleResultsFound, NoResultFound
 from sqlalchemy.sql import Join
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -330,7 +331,7 @@ class FastCRUD(
         db_instance: ModelType = self.model(**instance_dict)
         db_instance = await db.merge(db_instance)
         await db.commit()
-        
+
         return db_instance
 
     async def select(
