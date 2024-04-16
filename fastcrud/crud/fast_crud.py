@@ -405,6 +405,7 @@ class FastCRUD(
         db: AsyncSession,
         schema_to_select: Optional[type[BaseModel]] = None,
         return_as_model: bool = False,
+        strict: bool = False,
         **kwargs: Any,
     ) -> Optional[Union[dict, BaseModel]]:
         """
@@ -420,11 +421,13 @@ class FastCRUD(
         Args:
             db: The database session to use for the operation.
             schema_to_select: Optional Pydantic schema for selecting specific columns.
+            strict: Flag to get strictly one or no result. Multiple results are not allowed.
             return_as_model: If True, converts the fetched data to Pydantic models based on schema_to_select. Defaults to False.
             **kwargs: Filters to apply to the query, using field names for direct matches or appending comparison operators for advanced queries.
 
         Raises:
             ValueError: If return_as_model is True but schema_to_select is not provided.
+            MultipleResultsFound: if `strict` is False and many result correspond to the passed filter.
 
         Returns:
             A dictionary or a Pydantic model instance of the fetched database row, or None if no match is found.
@@ -453,9 +456,9 @@ class FastCRUD(
         stmt = await self.select(schema_to_select=schema_to_select, **kwargs)
 
         db_row = await db.execute(stmt)
-        result: Optional[Row] = db_row.one_or_none()
+        result: Optional[Row] = db_row.one_or_none() if strict else db_row.first()
         if result is None:
-            return
+            return None
         out: dict = dict(result._mapping)
         if not return_as_model:
             return out
@@ -464,51 +467,6 @@ class FastCRUD(
                 "schema_to_select must be provided when return_as_model is True."
             )
         return schema_to_select(**out)
-
-    def _get_pk_dict(self, instance):
-        return {pk.name: getattr(instance, pk.name) for pk in self._primary_keys}
-
-    async def upsert(
-        self,
-        db: AsyncSession,
-        instance: Union[UpdateSchemaType, CreateSchemaType],
-        schema_to_select: Optional[type[BaseModel]] = None,
-        return_as_model: bool = False,
-    ) -> Union[BaseModel, Dict[str, Any], None]:
-        """Update the instance or create it if it doesn't exists.
-
-        Args:
-            db (AsyncSession): The database session to use for the operation.
-            instance (Union[UpdateSchemaType, type[BaseModel]]): A Pydantic schema representing the instance.
-            schema_to_select (Optional[type[BaseModel]], optional): Optional Pydantic schema for selecting specific columns. Defaults to None.
-            return_as_model (bool, optional): If True, converts the fetched data to Pydantic models based on schema_to_select. Defaults to False.
-
-        Returns:
-            BaseModel: the created or updated instance
-        """
-        _pks = self._get_pk_dict(instance)
-        schema_to_select = schema_to_select or type(instance)
-        db_instance = await self.get(
-            db,
-            schema_to_select=schema_to_select,
-            return_as_model=return_as_model,
-            **_pks,
-        )
-        if db_instance is None:
-            db_instance = await self.create(db, instance)  # type: ignore
-            db_instance = schema_to_select.model_validate(
-                db_instance, from_attributes=True
-            )
-        else:
-            await self.update(db, instance)  # type: ignore
-            db_instance = await self.get(
-                db,
-                schema_to_select=schema_to_select,
-                return_as_model=return_as_model,
-                **_pks,
-            )
-
-        return db_instance
 
     async def exists(self, db: AsyncSession, **kwargs: Any) -> bool:
         """
