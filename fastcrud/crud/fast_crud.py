@@ -1,8 +1,9 @@
-from typing import Any, Generic, TypeVar, Union, Optional
+from typing import Any, Dict, Generic, TypeVar, Union, Optional
 from datetime import datetime, timezone
 
 from pydantic import BaseModel, ValidationError
 from sqlalchemy import select, update, delete, func, inspect, asc, desc
+import sqlalchemy
 from sqlalchemy.exc import ArgumentError, MultipleResultsFound, NoResultFound
 from sqlalchemy.sql import Join
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -166,6 +167,7 @@ class FastCRUD(
         self.is_deleted_column = is_deleted_column
         self.deleted_at_column = deleted_at_column
         self.updated_at_column = updated_at_column
+        self._primary_keys = _get_primary_keys(self.model)
 
     def _parse_filters(
         self, model: Optional[Union[type[ModelType], AliasedClass]] = None, **kwargs
@@ -271,7 +273,7 @@ class FastCRUD(
 
         return stmt
 
-    async def create(self, db: AsyncSession, object: CreateSchemaType) -> ModelType:
+    async def create(self, db: AsyncSession, instance: CreateSchemaType) -> ModelType:
         """
         Create a new record in the database.
 
@@ -282,11 +284,56 @@ class FastCRUD(
         Returns:
             The created database object.
         """
-        object_dict = object.model_dump()
-        db_object: ModelType = self.model(**object_dict)
-        db.add(db_object)
+        table_name_to_class = {
+            m.tables[0].name: m.class_ for m in self.model.registry.mappers
+        }
+        inspector = inspect(self.model)
+        relationships = inspector.relationships
+        elmts = {}
+        for r in relationships:
+            attr_name = r.key
+            if not hasattr(instance, attr_name):
+                continue
+
+            value = getattr(instance, attr_name, None)
+            if value is None:
+                continue
+
+            target_table_name = r.target.name
+            TargetModel = table_name_to_class[target_table_name]
+
+            subcrud = FastCRUD(model=TargetModel)
+
+            if getattr(self.model, attr_name).prop.secondary is not None or isinstance(
+                value, list
+            ):
+                _subelements = []
+                for elmt in value:
+                    db_elmt = await subcrud.get(db, **elmt.model_dump())
+                    db_elmt = (
+                        await subcrud.create(db, elmt)
+                        if db_elmt is None
+                        else subcrud.model(**db_elmt)
+                    )
+
+                    _subelements.append(db_elmt)
+                elmts[attr_name] = _subelements
+            else:
+                db_elmt = await subcrud.get(db, **value.model_dump())
+                db_elmt = (
+                    await subcrud.create(db, value)
+                    if db_elmt is None
+                    else subcrud.model(**db_elmt)
+                )
+                elmts[attr_name] = db_elmt
+
+        instance_dict = dict(**elmts, **instance.model_dump(exclude=set(elmts)))
+
+        db_instance: ModelType = self.model(**instance_dict)
+        db_instance = await db.merge(db_instance)
         await db.commit()
-        return db_object
+
+        return db_instance
 
     async def select(
         self,
@@ -362,6 +409,7 @@ class FastCRUD(
         db: AsyncSession,
         schema_to_select: Optional[type[BaseModel]] = None,
         return_as_model: bool = False,
+        strict: bool = False,
         **kwargs: Any,
     ) -> Optional[Union[dict, BaseModel]]:
         """
@@ -377,10 +425,13 @@ class FastCRUD(
         Args:
             db: The database session to use for the operation.
             schema_to_select: Optional Pydantic schema for selecting specific columns.
+            strict: Flag to get strictly one or no result. Multiple results are not allowed.
+            return_as_model: If True, converts the fetched data to Pydantic models based on schema_to_select. Defaults to False.
             **kwargs: Filters to apply to the query, using field names for direct matches or appending comparison operators for advanced queries.
 
         Raises:
             ValueError: If return_as_model is True but schema_to_select is not provided.
+            MultipleResultsFound: if `strict` is False and many result correspond to the passed filter.
 
         Returns:
             A dictionary or a Pydantic model instance of the fetched database row, or None if no match is found.
@@ -409,18 +460,17 @@ class FastCRUD(
         stmt = await self.select(schema_to_select=schema_to_select, **kwargs)
 
         db_row = await db.execute(stmt)
-        result: Optional[Row] = db_row.first()
-        if result is not None:
-            out: dict = dict(result._mapping)
-            if return_as_model:
-                if not schema_to_select:
-                    raise ValueError(
-                        "schema_to_select must be provided when return_as_model is True."
-                    )
-                return schema_to_select(**out)
+        result: Optional[Row] = db_row.one_or_none() if strict else db_row.first()
+        if result is None:
+            return None
+        out: dict = dict(result._mapping)
+        if not return_as_model:
             return out
-
-        return None
+        if not schema_to_select:
+            raise ValueError(
+                "schema_to_select must be provided when return_as_model is True."
+            )
+        return schema_to_select(**out)
 
     async def exists(self, db: AsyncSession, **kwargs: Any) -> bool:
         """

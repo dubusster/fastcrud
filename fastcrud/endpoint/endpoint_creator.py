@@ -3,6 +3,7 @@ from typing import Dict, Type, TypeVar, Optional, Callable, Sequence, Union
 from enum import Enum
 
 from fastapi import Depends, Body, Query, APIRouter, params
+from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import DeclarativeBase
@@ -228,18 +229,19 @@ class EndpointCreator:
             item: self.create_schema = Body(...),  # type: ignore
         ):
             unique_columns = _extract_unique_columns(self.model)
-
             for column in unique_columns:
                 col_name = column.name
-                if hasattr(item, col_name):
-                    value = getattr(item, col_name)
-                    exists = await self.crud.exists(db, **{col_name: value})
-                    if exists:  # pragma: no cover
-                        raise DuplicateValueException(
-                            f"Value {value} is already registered"
-                        )
-
-            return await self.crud.create(db, item)
+                if not hasattr(item, col_name):
+                    continue
+                value = getattr(item, col_name)
+                exists = await self.crud.exists(db, **{col_name: value})
+                if exists:  # pragma: no cover
+                    raise DuplicateValueException(
+                        f"Value {value} is already registered"
+                    )
+            res = await self.crud.create(db, item)
+            jsonable_encoder(res, exclude={f"{self.model.__table__.name}s"})
+            return res
 
         return endpoint
 
