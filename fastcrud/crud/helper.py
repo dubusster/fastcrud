@@ -99,3 +99,11 @@ def _auto_detect_join_condition(
         raise ValueError("Could not automatically get model columns.")
 
     return join_on
+
+
+def _get_relationships(model: type[DeclarativeBase]):
+    """Get the primary key of a SQLAlchemy model."""
+    inspector = inspect(model).mapper
+    relationships = inspector.relationships
+
+    return relationships

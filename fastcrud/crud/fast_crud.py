@@ -15,6 +15,7 @@ from sqlalchemy.sql.selectable import Select
 from .helper import (
     _extract_matching_columns_from_schema,
     _auto_detect_join_condition,
+    _get_relationships,
     JoinConfig,
 )
 
@@ -348,6 +349,10 @@ class FastCRUD(
         )
         filters = self._parse_filters(**kwargs)
         stmt = select(*to_select).filter(*filters)
+        # relationships = _get_relationships(self.model)
+        # for r in relationships:
+        #     stmt = stmt.join(r.target)
+
         if sort_columns:
             stmt = self._apply_sorting(stmt, sort_columns, sort_orders)
         return stmt
@@ -401,11 +406,7 @@ class FastCRUD(
             user = await crud.get(db, username__ne='admin')
             ```
         """
-        to_select = _extract_matching_columns_from_schema(
-            model=self.model, schema=schema_to_select
-        )
-        filters = self._parse_filters(**kwargs)
-        stmt = select(*to_select).filter(*filters)
+        stmt = await self.select(schema_to_select=schema_to_select, **kwargs)
 
         db_row = await db.execute(stmt)
         result: Optional[Row] = db_row.first()
@@ -653,12 +654,12 @@ class FastCRUD(
         if limit < 0 or offset < 0:
             raise ValueError("Limit and offset must be non-negative.")
 
-        to_select = _extract_matching_columns_from_schema(self.model, schema_to_select)
-        filters = self._parse_filters(**kwargs)
-        stmt = select(*to_select).filter(*filters)
-
-        if sort_columns:
-            stmt = self._apply_sorting(stmt, sort_columns, sort_orders)
+        stmt = await self.select(
+            schema_to_select=schema_to_select,
+            sort_columns=sort_columns,
+            sort_orders=sort_orders,
+            **kwargs,
+        )
 
         stmt = stmt.offset(offset).limit(limit)
         result = await db.execute(stmt)
@@ -1281,12 +1282,10 @@ class FastCRUD(
         if limit == 0:
             return {"data": [], "next_cursor": None}
 
-        to_select = _extract_matching_columns_from_schema(self.model, schema_to_select)
-        filters = self._parse_filters(**kwargs)
-
-        stmt = select(*to_select)
-        if filters:
-            stmt = stmt.filter(*filters)
+        stmt = await self.select(
+            schema_to_select=schema_to_select,
+            **kwargs,
+        )
 
         if cursor:
             if sort_order == "asc":
