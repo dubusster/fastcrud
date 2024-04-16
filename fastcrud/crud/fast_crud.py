@@ -16,6 +16,7 @@ from sqlalchemy.sql.selectable import Select
 from .helper import (
     _extract_matching_columns_from_schema,
     _auto_detect_join_condition,
+    _get_relationships,
     JoinConfig,
 )
 
@@ -395,6 +396,9 @@ class FastCRUD(
         )
         filters = self._parse_filters(**kwargs)
         stmt = select(*to_select).filter(*filters)
+        # relationships = _get_relationships(self.model)
+        # for r in relationships:
+        #     stmt = stmt.join(r.target)
 
         if sort_columns:
             stmt = self._apply_sorting(stmt, sort_columns, sort_orders)
