@@ -396,10 +396,10 @@ class FastCRUD(
         )
         filters = self._parse_filters(**kwargs)
         stmt = select(*to_select).filter(*filters)
-        relationships = _get_relationships(self.model)
-        for r in relationships:
-            if r.target in stmt.froms:
-                stmt = stmt.join(r.target)
+        # relationships = _get_relationships(self.model)
+        # for r in relationships:
+        #     if r.target in to_select:
+        #         stmt = stmt.join(r.target)
 
         if sort_columns:
             stmt = self._apply_sorting(stmt, sort_columns, sort_orders)
