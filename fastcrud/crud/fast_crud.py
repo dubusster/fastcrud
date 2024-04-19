@@ -1,8 +1,9 @@
-from typing import Any, Generic, TypeVar, Union, Optional
+from typing import Any, Dict, Generic, TypeVar, Union, Optional
 from datetime import datetime, timezone
 
 from pydantic import BaseModel, ValidationError
 from sqlalchemy import select, update, delete, func, inspect, asc, desc
+import sqlalchemy
 from sqlalchemy.exc import ArgumentError, MultipleResultsFound, NoResultFound
 from sqlalchemy.sql import Join
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,6 +16,7 @@ from sqlalchemy.sql.selectable import Select
 from .helper import (
     _extract_matching_columns_from_schema,
     _auto_detect_join_condition,
+    _get_relationships,
     JoinConfig,
 )
 
@@ -165,6 +167,7 @@ class FastCRUD(
         self.is_deleted_column = is_deleted_column
         self.deleted_at_column = deleted_at_column
         self.updated_at_column = updated_at_column
+        self._primary_keys = _get_primary_keys(self.model)
 
     def _parse_filters(
         self, model: Optional[Union[type[ModelType], AliasedClass]] = None, **kwargs
@@ -270,7 +273,7 @@ class FastCRUD(
 
         return stmt
 
-    async def create(self, db: AsyncSession, object: CreateSchemaType) -> ModelType:
+    async def create(self, db: AsyncSession, instance: CreateSchemaType) -> ModelType:
         """
         Create a new record in the database.
 
@@ -281,11 +284,56 @@ class FastCRUD(
         Returns:
             The created database object.
         """
-        object_dict = object.model_dump()
-        db_object: ModelType = self.model(**object_dict)
-        db.add(db_object)
+        table_name_to_class = {
+            m.tables[0].name: m.class_ for m in self.model.registry.mappers
+        }
+        inspector = inspect(self.model)
+        relationships = inspector.relationships
+        elmts = {}
+        for r in relationships:
+            attr_name = r.key
+            if not hasattr(instance, attr_name):
+                continue
+
+            value = getattr(instance, attr_name, None)
+            if value is None:
+                continue
+
+            target_table_name = r.target.name
+            TargetModel = table_name_to_class[target_table_name]
+
+            subcrud = FastCRUD(model=TargetModel)
+
+            if getattr(self.model, attr_name).prop.secondary is not None or isinstance(
+                value, list
+            ):
+                _subelements = []
+                for elmt in value:
+                    db_elmt = await subcrud.get(db, **elmt.model_dump())
+                    db_elmt = (
+                        await subcrud.create(db, elmt)
+                        if db_elmt is None
+                        else subcrud.model(**db_elmt)
+                    )
+
+                    _subelements.append(db_elmt)
+                elmts[attr_name] = _subelements
+            else:
+                db_elmt = await subcrud.get(db, **value.model_dump())
+                db_elmt = (
+                    await subcrud.create(db, value)
+                    if db_elmt is None
+                    else subcrud.model(**db_elmt)
+                )
+                elmts[attr_name] = db_elmt
+
+        instance_dict = dict(**elmts, **instance.model_dump(exclude=set(elmts)))
+
+        db_instance: ModelType = self.model(**instance_dict)
+        db_instance = await db.merge(db_instance)
         await db.commit()
-        return db_object
+
+        return db_instance
 
     async def select(
         self,
@@ -348,6 +396,10 @@ class FastCRUD(
         )
         filters = self._parse_filters(**kwargs)
         stmt = select(*to_select).filter(*filters)
+        relationships = _get_relationships(self.model)
+        for r in relationships:
+            if r.target in stmt.froms:
+                stmt = stmt.join(r.target)
 
         if sort_columns:
             stmt = self._apply_sorting(stmt, sort_columns, sort_orders)
@@ -375,6 +427,7 @@ class FastCRUD(
             db: The database session to use for the operation.
             schema_to_select: Optional Pydantic schema for selecting specific columns.
             one_or_none: Flag to get strictly one or no result. Multiple results are not allowed.
+            return_as_model: If True, converts the fetched data to Pydantic models based on schema_to_select. Defaults to False.
             **kwargs: Filters to apply to the query, using field names for direct matches or appending comparison operators for advanced queries.
 
         Raises:
